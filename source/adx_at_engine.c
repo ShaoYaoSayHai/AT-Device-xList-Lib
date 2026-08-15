@@ -418,10 +418,8 @@ static int s_rx_window_step(adx_tick_t now, uint16_t *out_frame_len)
         s_rx_win_state = RX_WIN_COLLECTING;
 
         /* 继续落到 COLLECTING 分支尝试拼接(不return，下滚) */
-        /* fallthrough */
     }
-    /* fallthrough 故意不带break，让首帧后立即尝试拼接下一帧 */
-
+    /* fall through */
     case RX_WIN_COLLECTING:
     {
         /* 尝试非阻塞读后续帧拼接 */

@@ -1,14 +1,16 @@
 # ============================================================
 # ADX (AT Device X) Makefile
 # ============================================================
-# 默认使用主机 GCC 做语法编译验证（MinGW/MSVCRT）。
-# 交叉编译时通过命令行覆盖 CC / AR 即可，例如：
-#   make clean && make CC=arm-none-eabi-gcc AR=arm-none-eabi-ar
+# 默认交叉编译（arm-none-eabi），可通过环境变量或命令行覆盖：
+#   make                              用默认 arm-none-eabi-gcc 编译
+#   make CC=gcc AR=ar                 切回主机 gcc 做语法验证
+#   make clean                        清理 build/
 # ============================================================
 
-# ---- 工具链 ----
-CC      ?= gcc
-AR      ?= ar
+# ---- 工具链（默认 arm 交叉编译）----
+CROSS   ?= arm-none-eabi-
+CC      := $(CROSS)gcc
+AR      := $(CROSS)ar
 CFLAGS  ?= -Wall -Wextra -Wno-unused-parameter -std=c99 -O2 -g
 ARFLAGS  = rcs
 
@@ -18,7 +20,7 @@ BUILD_DIR := build
 
 # ---- 源文件 ----
 # 注意：usage_example.c 仅作示例（含 main/FreeRTOS/RT-Thread 演示），
-#       依赖外部 RTOS 头文件，不纳入默认构建；需单独 `make example`。
+#       依赖外部 RTOS 头文件，不纳入默认构建。
 LIB_SRCS := $(SRC_DIR)/adx_at_engine.c \
             $(SRC_DIR)/adx_port.c
 
