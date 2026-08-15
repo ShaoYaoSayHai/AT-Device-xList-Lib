@@ -1,0 +1,39 @@
+# ============================================================
+# ADX (AT Device X) .gitignore
+# ============================================================
+
+# ---- 参考源码(原项目代码，仅作参考不提交) ----
+参考源码/
+source/task_mobile_monitor.c
+source/task_mobile_monitor.h
+source/task_module_serial_comm.c
+source/task_module_serial_comm.h
+
+# ---- 压缩文件 ----
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+
+# ---- 构建产物 ----
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db
+desktop.ini
