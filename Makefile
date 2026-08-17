@@ -19,7 +19,7 @@ SRC_DIR   := source
 BUILD_DIR := build
 
 # ---- 源文件 ----
-# 注意：usage_example.c 仅作示例（含 main/FreeRTOS/RT-Thread 演示），
+# 注意：example/ 目录下的 usage_example.c 仅作示例（含 main/FreeRTOS/RT-Thread 演示），
 #       依赖外部 RTOS 头文件，不纳入默认构建。
 LIB_SRCS := $(SRC_DIR)/adx_at_engine.c \
             $(SRC_DIR)/adx_port.c
@@ -52,9 +52,11 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # ---- 目录 ----
+# 注：使用 POSIX 命令，要求 make 后端为 sh
+#     （Linux/macOS 天然满足；Windows 需 xpack-windows-build-tools / MSYS2 / Git Bash 提供 sh）
 $(BUILD_DIR):
-	@if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)
 
 # ---- 清理 ----
 clean:
-	@if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)

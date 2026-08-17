@@ -1,20 +1,21 @@
 # ADX (AT Device X) —— 通用AT模组通信库设计说明
 
-> 作者：Zorian (1551769443@qq.com)
 > 整理日期：2026-08-16
->
+> 
 > 本仓库包含两部分：
->
+> 
 > **一、原项目代码（参考，已 gitignore）**
+> 
 > - `task_module_serial_comm.c / .h` —— 原模组串行通信底层任务
 > - `task_mobile_monitor.c / .h` —— 原 WIFI/BLE 模组业务监控
->
+> 
 > **二、ADX 通用库（本仓库核心产出）**
+> 
 > - `source/adx_config.h` —— 配置中心：心跳周期、临界区策略、缓冲区大小、轮询节奏
 > - `source/adx_port.h / .c` —— 硬件/RTOS 抽象层：串口、临界区、互斥锁、心跳（空实现，移植时填充）
 > - `source/adx_at_engine.h / .c` —— AT 指令引擎核心：Map 表驱动 + 动态队列 + URC 全局分发
 > - `source/adx_at_engine_usage_example.c` —— 使用示例
->
+> 
 > ADX = **A**T **D**evice **X**（复合型组件），目标是做一个可移植、可复用的 AT 模组通信库。
 
 ---
@@ -62,12 +63,12 @@
 
 定义见 `task_module_serial_comm.h:14-21`：
 
-| 状态 | 含义 |
-|------|------|
-| `AT_COMMAND_STATE_IDLE` | 空闲，等待从发送队列取出下一条指令 |
-| `AT_COMMAND_STATE_SEND` | 取到指令，正在通过 UART 发送 |
-| `AT_COMMAND_STATE_WAITING` | 已发送，等待模组响应，期间调用回调解析 |
-| `AT_COMMAND_STATE_RESP_OK` | 回调返回 0，响应已成功处理 |
+| 状态                         | 含义                       |
+| -------------------------- | ------------------------ |
+| `AT_COMMAND_STATE_IDLE`    | 空闲，等待从发送队列取出下一条指令        |
+| `AT_COMMAND_STATE_SEND`    | 取到指令，正在通过 UART 发送        |
+| `AT_COMMAND_STATE_WAITING` | 已发送，等待模组响应，期间调用回调解析      |
+| `AT_COMMAND_STATE_RESP_OK` | 回调返回 0，响应已成功处理           |
 | `AT_COMMAND_STATE_TIMEOUT` | 超过 `timeout_ms` 仍未收到有效响应 |
 
 状态流转见 `task_module_serial_comm.c:168-243`，关键点：
@@ -134,26 +135,26 @@ static urc_msg_t urc_receive_info_callback_map[16]; // 最多 16 个 URC 注册�
 
 主循环 `task_mobile_monitor_running()` (`task_mobile_monitor.c:225-327`) 按当前状态分派不同动作：
 
-| 状态 | 动作函数 | 说明 |
-|------|----------|------|
-| `UNKNOWN` | `mobile_at_command_test_run` | 发 `AT\r\n` 探测模组存活 |
-| `NOT_CONNECTED` | `mobile_at_wjap_run` | 15s 一次发 `AT+WJAP=ssid,pwd` |
-| `IS_BUSY` | `mobile_at_command_busy_run` | 15s 一次发 `AT+STAINFO?` 探测，重试 5 次回 UNKNOWN |
-| `IP_LOST` / `FAILED` | `mobile_at_stainfo_check_run` | 5s 一次轮询 STAINFO |
-| `CONNECTED` | `mobile_connected_status_check` | 30s 一次巡检 + RSSI 查询 + BCD 校时 |
+| 状态                   | 动作函数                            | 说明                                       |
+| -------------------- | ------------------------------- | ---------------------------------------- |
+| `UNKNOWN`            | `mobile_at_command_test_run`    | 发 `AT\r\n` 探测模组存活                        |
+| `NOT_CONNECTED`      | `mobile_at_wjap_run`            | 15s 一次发 `AT+WJAP=ssid,pwd`               |
+| `IS_BUSY`            | `mobile_at_command_busy_run`    | 15s 一次发 `AT+STAINFO?` 探测，重试 5 次回 UNKNOWN |
+| `IP_LOST` / `FAILED` | `mobile_at_stainfo_check_run`   | 5s 一次轮询 STAINFO                          |
+| `CONNECTED`          | `mobile_connected_status_check` | 30s 一次巡检 + RSSI 查询 + BCD 校时              |
 
 ### 3.2 AT 响应回调函数集
 
 每个 AT 指令在发送时绑定一个 `rx_callback`，回调内部用 `strstr` 匹配关键字符串并推进状态机：
 
-| 回调 | 触发指令 | 匹配关键字 | 动作 |
-|------|----------|------------|------|
-| `mobile_at_command_test_recv_callback` | `AT` | `OK\r\n` | 继续发 `AT+STAINFO?` 查状态 |
-| `mobile_at_status_check` | `AT+STAINFO?` | `+STAINFO:0..4` | 通过 `prvParseStaInfoStatus` 直接写状态机 |
-| `mobile_at_wifi_join_ap_callback` | `AT+WJAP=` | （无条件） | 置 `IS_BUSY` |
-| `mobile_at_wrssi_callback` | `AT+WRSSI?` | `+WRSSI:` + `OK` | 解析 RSSI 并更新全局值 |
-| `mobile_at_command_test_timeout_callback` | 通用超时 | — | 置 `UNKNOWN` |
-| `mobile_at_command_wjap_timeout_callback` | WJAP 超时 | — | `retry_count++` |
+| 回调                                        | 触发指令          | 匹配关键字            | 动作                                |
+| ----------------------------------------- | ------------- | ---------------- | --------------------------------- |
+| `mobile_at_command_test_recv_callback`    | `AT`          | `OK\r\n`         | 继续发 `AT+STAINFO?` 查状态             |
+| `mobile_at_status_check`                  | `AT+STAINFO?` | `+STAINFO:0..4`  | 通过 `prvParseStaInfoStatus` 直接写状态机 |
+| `mobile_at_wifi_join_ap_callback`         | `AT+WJAP=`    | （无条件）            | 置 `IS_BUSY`                       |
+| `mobile_at_wrssi_callback`                | `AT+WRSSI?`   | `+WRSSI:` + `OK` | 解析 RSSI 并更新全局值                    |
+| `mobile_at_command_test_timeout_callback` | 通用超时          | —                | 置 `UNKNOWN`                       |
+| `mobile_at_command_wjap_timeout_callback` | WJAP 超时       | —                | `retry_count++`                   |
 
 `prvParseStaInfoStatus` (`task_mobile_monitor.c:407-441`) 是一个轻量解析器：只做一次 `strstr`，然后取 `+STAINFO:` 后第 9 个字符作为状态码，避免了重复扫描。
 
@@ -161,12 +162,12 @@ static urc_msg_t urc_receive_info_callback_map[16]; // 最多 16 个 URC 注册�
 
 业务层通过 `urc_register_callback()` 注册的 URC 处理函数：
 
-| URC 回调 | 匹配串 | 作用 |
-|----------|--------|------|
-| `urc_mobile_wifi_connect_success_callback` | `+EVENT:WIFI_GOT_IP` | 置 `CONNECTED` |
-| `urc_mobile_wifi_connect_busy_callback` | `[Busy]Cmd running` | 置 `IS_BUSY` |
-| `urc_mobile_ble_connect_success_callback` | `+EVENT:BLE_CONNECT` | 发 `+++` 退出透传 |
-| `urc_mobile_ble_data_recv_callback` | `+DATA:` | 提取数据并交给 `ble_controller_recv_command` |
+| URC 回调                                     | 匹配串                  | 作用                                    |
+| ------------------------------------------ | -------------------- | ------------------------------------- |
+| `urc_mobile_wifi_connect_success_callback` | `+EVENT:WIFI_GOT_IP` | 置 `CONNECTED`                         |
+| `urc_mobile_wifi_connect_busy_callback`    | `[Busy]Cmd running`  | 置 `IS_BUSY`                           |
+| `urc_mobile_ble_connect_success_callback`  | `+EVENT:BLE_CONNECT` | 发 `+++` 退出透传                          |
+| `urc_mobile_ble_data_recv_callback`        | `+DATA:`             | 提取数据并交给 `ble_controller_recv_command` |
 
 `mobile_ble_extract_data` (`task_mobile_monitor.c:530-567`) 解析 `+DATA:<len>,<payload>` 格式，手工数字解析长度，并做容量与边界校验后 `memcpy` 到全局缓冲区 `g_mobile_ble_data_buffer`。
 
@@ -244,6 +245,7 @@ void adx_chain_reaction_polling(void);
 ```
 
 **为什么拆成两个？**
+
 - `adx_heartbeat()` 维护一个 `volatile uint32_t` 计数器，每次调用自增1并返回新值，是引擎所有时间判断的基准。
 - `adx_chain_reaction_polling()` 每次调用执行一轮引擎逻辑（收串口→URC→AT状态机），内部通过 `adx_tick_get_now()` 读取当前tick，用「本次值 - 上次值」差值判断时间流逝，**绝不阻塞**。
 
@@ -260,6 +262,7 @@ while (1) {
 ```
 
 为什么这个顺序？
+
 - polling 先执行，读取的是上一轮 heartbeat 自增后的值
 - heartbeat 后执行，自增 tick 为下一轮 polling 准备
 - delay 时间应与 `ADX_HEARTBEAT_PERIOD_MS` 相等或相近
@@ -335,6 +338,7 @@ source/adx_at_engine.c       引擎核心实现(只调 adx_port 接口)
 ```
 
 **依赖关系（关键）**：
+
 ```
 adx_at_engine.c ──► adx_at_engine.h ──► adx_config.h
                                      └► adx_port.h ──► adx_port.c (移植层)
@@ -342,6 +346,7 @@ adx_at_engine.c ──► adx_at_engine.h ──► adx_config.h
                                                             ▼
                                                   裸机 / FreeRTOS / RT-Thread
 ```
+
 引擎核心**绝不直接** include 任何 RTOS 头文件或业务头文件。
 
 ## 6.4 核心数据结构
@@ -364,14 +369,15 @@ typedef struct {
 ```
 
 **portName 的核心价值**：
+
 > 同一条 AT 指令（如 `AT+STAINFO?`）在不同模组状态下语义不同，需要绑定不同的解析回调。
 > 通过 `port_name` 字段区分，可以在 Map 中注册多条相同 `cmd` 但不同 `port_name` 的条目：
 
-| cmd | port_name | monitor_state | interval_ms | rx_cb |
-|-----|-----------|---------------|-------------|-------|
-| `AT+STAINFO?\r\n` | `stainfo_busy_probe` | IS_BUSY | 5000 | busy 状态解析(看是否脱离busy) |
-| `AT+STAINFO?\r\n` | `stainfo_connected_poll` | CONNECTED | 30000 | 巡检解析(看是否掉线) |
-| `AT+STAINFO?\r\n` | `stainfo_iplost_retry` | IP_LOST | 5000 | 重试解析(看是否恢复) |
+| cmd               | port_name                | monitor_state | interval_ms | rx_cb                |
+| ----------------- | ------------------------ | ------------- | ----------- | -------------------- |
+| `AT+STAINFO?\r\n` | `stainfo_busy_probe`     | IS_BUSY       | 5000        | busy 状态解析(看是否脱离busy) |
+| `AT+STAINFO?\r\n` | `stainfo_connected_poll` | CONNECTED     | 30000       | 巡检解析(看是否掉线)          |
+| `AT+STAINFO?\r\n` | `stainfo_iplost_retry`   | IP_LOST       | 5000        | 重试解析(看是否恢复)          |
 
 这样「同一指令、不同上下文、不同回调」的关系在表里一目了然，且支持运行时通过 `adx_at_map_update_callback(port_name, ...)` 替换回调。
 
@@ -410,6 +416,7 @@ s_map_scan_pick_oldest():
 ```
 
 **优点**：
+
 - 公平性：不依赖 Map 中的位置顺序，避免靠前项持续抢占。
 - 状态过滤：只扫描当前状态下的条目，未激活状态的指令不参与调度。
 - `last_run_tick=0`（从未执行）的条目优先级最高，保证初始化后能快速启动。
@@ -453,10 +460,12 @@ adx_chain_reaction_polling() 每次调用执行一轮:
 ```
 
 **与原设计的区别**：
+
 - 原设计：`while(1)` 阻塞循环 + `vTaskDelay` 延时，只能在 RTOS 任务里跑
 - 新设计：非阻塞函数，每次调用推进一步，裸机/RTOS 通用，内部用时间戳控制节奏
 
 **接收窗口聚合也改为非阻塞状态机**：
+
 - 原设计：`collect_rx_window_frame()` 内部 `while` 循环阻塞读帧
 - 新设计：`s_rx_window_step()` 每次调用读一帧，窗口超时才返回完整帧
 
@@ -465,6 +474,7 @@ adx_chain_reaction_polling() 每次调用执行一轮:
 ### 6.7.1 心跳时间基准
 
 `adx_heartbeat()` 已在 `source/adx_port.c` 中实现，维护 `volatile uint32_t` 计数器：
+
 ```c
 static volatile adx_tick_t s_heartbeat_tick = 0U;
 
@@ -473,10 +483,12 @@ adx_tick_t adx_tick_get_now(void)   { return s_heartbeat_tick; }  /* 引擎内�
 ```
 
 **职责分离**：
+
 - `adx_heartbeat()`：移植者调用，自增计数器（任务模式放 polling 后，裸机放中断）
 - `adx_tick_get_now()`：引擎内部调用，读取当前值（不自增）
 
 **调用顺序（任务模式）**：
+
 ```
 polling()  →  读 adx_tick_get_now()，用差值判断时间
 heartbeat() →  自增计数器，为下一轮准备
@@ -488,6 +500,7 @@ delay()    →  等待 ADX_HEARTBEAT_PERIOD_MS
 ### 6.7.2 临界区可配置
 
 在 `source/adx_config.h` 中二选一：
+
 ```c
 #define ADX_CRITICAL_USE_DISABLE_IRQ  /* 关中断实现(默认，安全) */
 /* #define ADX_CRITICAL_USE_NONE */   /* 空实现(确认无中断竞争时用) */
@@ -498,44 +511,45 @@ delay()    →  等待 ADX_HEARTBEAT_PERIOD_MS
 
 ### 6.7.3 port 层接口清单（精简为 11 个）
 
-| 类别 | 接口 | 实现状态 |
-|------|------|----------|
-| 心跳 | `adx_heartbeat` | ✅ 已实现(自增+返回值) |
-| 时间 | `adx_tick_get_now` | ✅ 已实现(读当前值，不自增) |
-| 时间 | `adx_tick_from_ms` | ✅ 已实现(ms转tick) |
-| 串口 | `adx_port_uart_init` | ⬜ 空实现，移植时填 |
-| 串口 | `adx_port_uart_send` | ⬜ 空实现，移植时填 |
-| 串口 | `adx_port_uart_read_frame` | ⬜ 空实现，移植时填 |
-| 临界区 | `adx_port_enter_critical` | ⬜ 按宏切换(关中断/空) |
-| 临界区 | `adx_port_exit_critical` | ⬜ 按宏切换(关中断/空) |
-| 互斥锁 | `adx_port_mutex_create` | ⬜ 空实现，移植时填 |
-| 互斥锁 | `adx_port_mutex_lock` | ⬜ 空实现，移植时填 |
-| 互斥锁 | `adx_port_mutex_unlock` | ⬜ 空实现，移植时填 |
+| 类别  | 接口                         | 实现状态            |
+| --- | -------------------------- | --------------- |
+| 心跳  | `adx_heartbeat`            | ✅ 已实现(自增+返回值)   |
+| 时间  | `adx_tick_get_now`         | ✅ 已实现(读当前值，不自增) |
+| 时间  | `adx_tick_from_ms`         | ✅ 已实现(ms转tick)  |
+| 串口  | `adx_port_uart_init`       | ⬜ 空实现，移植时填      |
+| 串口  | `adx_port_uart_send`       | ⬜ 空实现，移植时填      |
+| 串口  | `adx_port_uart_read_frame` | ⬜ 空实现，移植时填      |
+| 临界区 | `adx_port_enter_critical`  | ⬜ 按宏切换(关中断/空)   |
+| 临界区 | `adx_port_exit_critical`   | ⬜ 按宏切换(关中断/空)   |
+| 互斥锁 | `adx_port_mutex_create`    | ⬜ 空实现，移植时填      |
+| 互斥锁 | `adx_port_mutex_lock`      | ⬜ 空实现，移植时填      |
+| 互斥锁 | `adx_port_mutex_unlock`    | ⬜ 空实现，移植时填      |
 
 心跳和时间接口已有默认实现，移植时只需填充串口 + 临界区 + 互斥锁（共8个函数），引擎核心无需任何修改。
 
 ## 6.8 架构对比（原项目 vs ADX 库）
 
-| 维度 | 原项目 | ADX 库 |
-|------|--------|--------|
-| 运行方式 | 阻塞式 while(1) 任务 | 非阻塞轮询函数 |
-| 任务数量 | 2个（monitor + serial_comm） | 0个（移植者决定） |
-| 时间基准 | xTaskGetTickCount (FreeRTOS) | adx_heartbeat (通用) |
-| 裸机支持 | ❌ 不支持 | ✅ 支持 |
-| 监控逻辑 | switch(state) + 散装 run 函数 | Map表数据驱动 |
-| 新增监控指令 | 改主循环代码 | 注册一条Map项 |
-| 同指令不同上下文 | 靠不同run函数隐式区分 | portName显式标识 |
-| 临时指令插入 | 无统一入口 | `adx_at_enqueue()` |
-| 调度公平性 | 靠switch顺序 | 最久未执行优先 |
-| 接收窗口聚合 | 阻塞while循环 | 非阻塞状态机 |
-| 硬件依赖 | 直接调 bsp | port 层抽象 |
-| 业务耦合 | 依赖 app_mobile_msg.h 等 | 完全独立，内部重定义类型 |
-| AT状态机语义 | IDLE→SEND→WAITING→RESP_OK/TIMEOUT | 原样保留 |
-| 回调解析机制 | 响应窗口内回调 | 原样保留 |
+| 维度       | 原项目                               | ADX 库              |
+| -------- | --------------------------------- | ------------------ |
+| 运行方式     | 阻塞式 while(1) 任务                   | 非阻塞轮询函数            |
+| 任务数量     | 2个（monitor + serial_comm）         | 0个（移植者决定）          |
+| 时间基准     | xTaskGetTickCount (FreeRTOS)      | adx_heartbeat (通用) |
+| 裸机支持     | ❌ 不支持                             | ✅ 支持               |
+| 监控逻辑     | switch(state) + 散装 run 函数         | Map表数据驱动           |
+| 新增监控指令   | 改主循环代码                            | 注册一条Map项           |
+| 同指令不同上下文 | 靠不同run函数隐式区分                      | portName显式标识       |
+| 临时指令插入   | 无统一入口                             | `adx_at_enqueue()` |
+| 调度公平性    | 靠switch顺序                         | 最久未执行优先            |
+| 接收窗口聚合   | 阻塞while循环                         | 非阻塞状态机             |
+| 硬件依赖     | 直接调 bsp                           | port 层抽象           |
+| 业务耦合     | 依赖 app_mobile_msg.h 等             | 完全独立，内部重定义类型       |
+| AT状态机语义  | IDLE→SEND→WAITING→RESP_OK/TIMEOUT | 原样保留               |
+| 回调解析机制   | 响应窗口内回调                           | 原样保留               |
 
 ## 6.9 使用方式速览
 
 ### 初始化 + 注册
+
 ```c
 adx_at_engine_init();                      // 引擎初始化(调port uart_init)
 
@@ -553,6 +567,7 @@ adx_at_map_register(&(adx_map_item_t){     // 注册监控项
 ```
 
 ### 驱动引擎（关键！）
+
 ```c
 /* === 任务模式(FreeRTOS/RT-Thread) === */
 /* 调用顺序：polling → heartbeat → delay */
@@ -570,16 +585,19 @@ while (1) {
 ```
 
 ### 运行时插入临时指令
+
 ```c
 adx_at_enqueue("AT+HTTPGET=...\r\n", http_cb, 5000, http_timeout_cb);
 ```
 
 ### 运行时替换回调
+
 ```c
 adx_at_map_update_callback("at_alive_probe", new_rx_cb, NULL);
 ```
 
 ### URC回调推进状态机
+
 ```c
 int urc_wifi_got_ip(const uint8_t *buf, uint16_t len) {
     if (strstr((char*)buf, "+EVENT:WIFI_GOT_IP")) {
@@ -609,6 +627,7 @@ int urc_wifi_got_ip(const uint8_t *buf, uint16_t len) {
 - LICENSE 文件本地保留但**不提交到 git**（已在 `.gitignore` 中忽略）
 - 使用者需自行从 [Apache 官网](https://www.apache.org/licenses/LICENSE-2.0) 获取完整协议文本
 - 代码头部建议保留版权声明：
+  
   ```
   Copyright 2026 Zorian
   Licensed under the Apache License, Version 2.0

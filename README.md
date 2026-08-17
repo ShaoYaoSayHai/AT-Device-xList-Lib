@@ -1,6 +1,5 @@
 # ADX (AT Device X) —— 通用 AT 模组通信库
 
-> 作者：Zorian (1551769443@qq.com)
 > 版本：0.2 ｜ 更新日期：2026-08-16
 > 协议：Apache License 2.0
 
