@@ -166,8 +166,9 @@ int adx_at_engine_init(void);
  *   - RTOS：在任务 while(1) 里调用，配合 vTaskDelay 控制节奏
  *   - 裸机：在 main while(1) 里调用
  *
- * 引擎内部用时间戳控制实际执行节奏(ADX_LOOP_INTERVAL_MS / ADX_RESP_OK_COOLDOWN_MS)，
- * 不会阻塞，高频调用是安全的。
+ * RX读取和URC分发每次调用都会执行；AT状态机和下一条命令发送由
+ * ADX_LOOP_INTERVAL_MS / ADX_RESP_OK_COOLDOWN_MS 控制，不会阻塞。
+ * 因此应高频调用，避免port层接收缓冲积压。
  */
 void adx_chain_reaction_polling(void);
 

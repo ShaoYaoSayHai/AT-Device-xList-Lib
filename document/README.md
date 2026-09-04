@@ -332,7 +332,7 @@ source/adx_at_engine.c       引擎核心实现(只调 adx_port 接口)
                       ├─ 监控Map管理：register / update_callback / scan_pick_oldest
                       ├─ 动态队列：enqueue / dequeue (环形缓冲)
                       ├─ URC表：register / polling
-                      ├─ 接收窗口聚合：s_rx_window_step (非阻塞状态机)
+                      ├─ 接收采集/快速分发：s_rx_window_step (独立缓冲)
                       ├─ AT状态机：adx_chain_reaction_polling 主循环
                       └─ 引擎初始化：adx_at_engine_init
 ```
@@ -438,24 +438,22 @@ IDLE 分支:
 ```
 adx_chain_reaction_polling() 每次调用执行一轮:
 
-    [0] 节奏控制(时间戳判断，不阻塞)
-        if (now - last_poll) < interval: return  # 未到执行时间直接返回
-        last_poll = now
-        interval = RESP_OK ? ADX_RESP_OK_COOLDOWN_MS : ADX_LOOP_INTERVAL_MS
-
-    [1] 收串口帧 + URC分发  (非阻塞状态机)
-        s_rx_window_step()  # 每次推进一步，窗口超时才产出完整帧
+    [1] 收串口帧 + URC分发  (每次调用始终执行)
+        s_rx_window_step()  # CRLF文本立即分发；其他数据短静默兜底
         adx_at_urc_polling()
+        feed_current_at_response()  # 有新数据才调用当前rx_cb
+
+    [0] AT状态机节奏控制(时间戳判断，不阻塞)
+        if (now - last_state_step) < ADX_LOOP_INTERVAL_MS: return
+        # 只限制状态推进/下一条发送，不暂停RX与URC
 
     [2] AT状态机 (每次推进一步)
         IDLE:
             if queue非空:  load queue item -> SEND
             else:          scan map -> SEND (若无到期项则保持IDLE)
         SEND:     -> WAITING
-        WAITING:  调 rx_cb
-                  返回OK -> RESP_OK
-                  超时   -> TIMEOUT (时间戳判断)
-        RESP_OK:  清理 -> IDLE
+        WAITING:  检查总超时 -> TIMEOUT
+        RESP_OK:  等待发送冷却结束 -> 清理 -> IDLE
         TIMEOUT:  调 timeout_cb -> IDLE
 ```
 
@@ -464,10 +462,10 @@ adx_chain_reaction_polling() 每次调用执行一轮:
 - 原设计：`while(1)` 阻塞循环 + `vTaskDelay` 延时，只能在 RTOS 任务里跑
 - 新设计：非阻塞函数，每次调用推进一步，裸机/RTOS 通用，内部用时间戳控制节奏
 
-**接收窗口聚合也改为非阻塞状态机**：
+**接收路径采用非阻塞独立缓冲**：
 
 - 原设计：`collect_rx_window_frame()` 内部 `while` 循环阻塞读帧
-- 新设计：`s_rx_window_step()` 每次调用读一帧，窗口超时才返回完整帧
+- 新设计：UART采集缓冲和当前AT响应缓冲分离；CRLF文本立即分发，其他数据只等待短帧间静默；冷却期间也持续处理RX/URC
 
 ## 6.7 可移植性设计
 
@@ -540,7 +538,7 @@ delay()    →  等待 ADX_HEARTBEAT_PERIOD_MS
 | 同指令不同上下文 | 靠不同run函数隐式区分                      | portName显式标识       |
 | 临时指令插入   | 无统一入口                             | `adx_at_enqueue()` |
 | 调度公平性    | 靠switch顺序                         | 最久未执行优先            |
-| 接收窗口聚合   | 阻塞while循环                         | 非阻塞状态机             |
+| 接收窗口聚合   | 阻塞while循环                         | 独立缓冲、快速非阻塞分发   |
 | 硬件依赖     | 直接调 bsp                           | port 层抽象           |
 | 业务耦合     | 依赖 app_mobile_msg.h 等             | 完全独立，内部重定义类型       |
 | AT状态机语义  | IDLE→SEND→WAITING→RESP_OK/TIMEOUT | 原样保留               |

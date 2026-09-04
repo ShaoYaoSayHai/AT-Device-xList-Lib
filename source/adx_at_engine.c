@@ -30,8 +30,12 @@
 /*                          内部数据结构                                      */
 /* ======================================================================== */
 
-/* 接收窗口缓冲区 */
-static uint8_t s_recv_window_buffer[ADX_RX_WINDOW_BUFFER_SIZE + 1U];
+/* UART接收采集缓冲区：仅由接收窗口状态机写入 */
+static uint8_t s_rx_collect_buffer[ADX_RX_WINDOW_BUFFER_SIZE + 1U];
+
+/* 当前在途AT指令的响应累积缓冲区：与下一轮UART采集完全分离 */
+static uint8_t s_at_response_buffer[ADX_RX_WINDOW_BUFFER_SIZE + 1U];
+static uint16_t s_at_response_len = 0U;
 
 /* 监控Map表 */
 static adx_map_item_t s_monitor_map[ADX_MAP_SIZE];
@@ -53,9 +57,10 @@ static char s_current_cmd[ADX_CMD_BUFFER_SIZE];
 static uint16_t s_current_cmd_len = 0U;
 static uint32_t s_current_timeout_ms = 0U;
 static adx_tick_t s_last_send_tick = 0U;
+static adx_tick_t s_resp_ok_tick = 0U;
 
-/* 轮询节奏控制 */
-static adx_tick_t s_last_poll_tick = 0U;
+/* AT状态机推进节奏控制；UART接收与URC分发不受此变量限制 */
+static adx_tick_t s_last_state_step_tick = 0U;
 
 /* 模组监控状态(临界区保护) */
 static volatile adx_monitor_state_t s_monitor_state = ADX_MONITOR_STATE_UNKNOWN;
@@ -350,17 +355,15 @@ int adx_at_urc_polling(const uint8_t *buffer, uint16_t len)
 }
 
 /* ======================================================================== */
-/*                       接收窗口聚合(非阻塞状态机)                          */
+/*                       接收采集与响应累积                                  */
 /* ======================================================================== */
 /*
- * 原设计是阻塞式 while 循环读帧，裸机下不可用。
- * 改造为非阻塞状态机：每次 polling 调用推进一步。
+ * UART采集与当前AT事务响应使用两个独立缓冲区：
+ *   s_rx_collect_buffer : port层新数据只写这里，完成后立即分发
+ *   s_at_response_buffer: 仅累积当前在途AT指令收到的数据
  *
- * 状态：
- *   RX_WIN_IDLE     : 空闲，尝试读第一帧
- *   RX_WIN_COLLECTING : 已有首帧，窗口内继续拼接后续帧
- *
- * 配合 s_rx_win_last_recv_tick 和 s_rx_win_total_len 实现。
+ * 这样下一轮UART接收不会覆盖正在被AT回调解析的响应。文本数据以CRLF结尾时
+ * 立即交付；没有明确文本边界的数据则以ADX_RX_WINDOW_MS作为帧间静默兜底。
  */
 
 typedef enum
@@ -372,26 +375,53 @@ typedef enum
 static rx_win_state_t s_rx_win_state = RX_WIN_IDLE;
 static adx_tick_t s_rx_win_last_recv_tick = 0U;
 static uint16_t s_rx_win_total_len = 0U;
-static uint16_t s_rx_frame_len = 0U; /* 最近一次 polling 产出的完整帧长度 */
 
-static void s_recv_buffer_reset(void)
+static void s_at_response_buffer_reset(void)
 {
-    s_recv_window_buffer[0U] = '\0';
+    s_at_response_buffer[0U] = '\0';
+    s_at_response_len = 0U;
+}
+
+static void s_rx_window_reset(void)
+{
+    s_rx_collect_buffer[0U] = '\0';
+    s_rx_win_state = RX_WIN_IDLE;
+    s_rx_win_last_recv_tick = 0U;
     s_rx_win_total_len = 0U;
-    s_rx_frame_len = 0U;
+}
+
+static int s_rx_window_has_text_boundary(void)
+{
+    return (s_rx_win_total_len >= 2U &&
+            s_rx_collect_buffer[s_rx_win_total_len - 2U] == '\r' &&
+            s_rx_collect_buffer[s_rx_win_total_len - 1U] == '\n');
+}
+
+static int s_rx_window_publish(uint16_t *out_frame_len)
+{
+    if (out_frame_len == NULL || s_rx_win_total_len == 0U)
+    {
+        return ADX_FAIL;
+    }
+
+    *out_frame_len = s_rx_win_total_len;
+    s_rx_collect_buffer[s_rx_win_total_len] = '\0';
+    s_rx_win_state = RX_WIN_IDLE;
+    s_rx_win_total_len = 0U;
+    return ADX_OK;
 }
 
 /**
- * @brief 非阻塞接收窗口聚合(每次调用推进一步)
+ * @brief 非阻塞接收采集(每次调用最多读取一帧)
  *
  * @param now          当前心跳tick值(由polling传入)
  * @param out_frame_len 输出本次产出的完整帧长度(仅当返回ADX_OK时有效)
- * @return ADX_OK=本帧聚合完成可用, ADX_FAIL=正在聚合中/无数据
+ * @return ADX_OK=本次采集数据可分发, ADX_FAIL=正在等待后续分片/无数据
  *
  * 工作流程：
- *   IDLE: 非阻塞读一帧，读到则进入 COLLECTING，记录tick
- *   COLLECTING: 继续非阻塞读帧拼接；
- *               若窗口超时(ADX_RX_WINDOW_MS内无新帧)则判定聚合完成返回ADX_OK并回IDLE
+ *   1. 非阻塞读取一个port帧并追加到采集缓冲；
+ *   2. 若数据以CRLF结束或缓冲已满，立即交付；
+ *   3. 其他数据在ADX_RX_WINDOW_MS内无新分片后交付。
  */
 static int s_rx_window_step(adx_tick_t now, uint16_t *out_frame_len)
 {
@@ -401,65 +431,117 @@ static int s_rx_window_step(adx_tick_t now, uint16_t *out_frame_len)
     }
     *out_frame_len = 0U;
 
-    switch (s_rx_win_state)
+    if (s_rx_win_total_len >= ADX_RX_WINDOW_BUFFER_SIZE)
     {
-    case RX_WIN_IDLE:
+        return s_rx_window_publish(out_frame_len);
+    }
+
+    uint16_t remaining = (uint16_t)(ADX_RX_WINDOW_BUFFER_SIZE - s_rx_win_total_len);
+    uint16_t frame_len = 0U;
+    if (remaining > 0U &&
+        adx_port_uart_read_frame(&s_rx_collect_buffer[s_rx_win_total_len],
+                                 remaining,
+                                 &frame_len,
+                                 0U) == ADX_OK &&
+        frame_len > 0U)
     {
-        /* 非阻塞尝试读第一帧 */
-        uint16_t frame_len = 0U;
-        if (adx_port_uart_read_frame(s_recv_window_buffer,
-                                     ADX_RX_WINDOW_BUFFER_SIZE,
-                                     &frame_len,
-                                     0U) != ADX_OK || frame_len == 0U)
+        if (frame_len > remaining)
         {
-            return ADX_FAIL; /* 无数据 */
+            frame_len = remaining;
         }
 
-        s_rx_win_total_len = frame_len;
-        s_recv_window_buffer[s_rx_win_total_len] = '\0';
+        s_rx_win_total_len = (uint16_t)(s_rx_win_total_len + frame_len);
+        s_rx_collect_buffer[s_rx_win_total_len] = '\0';
         s_rx_win_last_recv_tick = now;
         s_rx_win_state = RX_WIN_COLLECTING;
 
-        /* 继续落到 COLLECTING 分支尝试拼接(不return，下滚) */
-    }
-    /* fall through */
-    case RX_WIN_COLLECTING:
-    {
-        /* 尝试非阻塞读后续帧拼接 */
-        uint16_t frame_len = 0U;
-        uint16_t remaining = (uint16_t)(ADX_RX_WINDOW_BUFFER_SIZE - s_rx_win_total_len);
-
-        if (remaining > 0U)
+        if (s_rx_win_total_len >= ADX_RX_WINDOW_BUFFER_SIZE ||
+            s_rx_window_has_text_boundary())
         {
-            if (adx_port_uart_read_frame(&s_recv_window_buffer[s_rx_win_total_len],
-                                         remaining,
-                                         &frame_len,
-                                         0U) == ADX_OK && frame_len > 0U)
-            {
-                s_rx_win_total_len = (uint16_t)(s_rx_win_total_len + frame_len);
-                s_recv_window_buffer[s_rx_win_total_len] = '\0';
-                s_rx_win_last_recv_tick = now;
-            }
+            return s_rx_window_publish(out_frame_len);
         }
 
-        /* 判断窗口是否超时(距上次收帧超过 ADX_RX_WINDOW_MS) */
+        return ADX_FAIL;
+    }
+
+    if (s_rx_win_state == RX_WIN_COLLECTING)
+    {
         adx_tick_t elapsed = now - s_rx_win_last_recv_tick;
         if (elapsed >= adx_tick_from_ms(ADX_RX_WINDOW_MS))
         {
-            /* 窗口超时，聚合完成 */
-            *out_frame_len = s_rx_win_total_len;
-            s_rx_win_state = RX_WIN_IDLE;
-            s_rx_win_total_len = 0U;
-            return ADX_OK;
+            return s_rx_window_publish(out_frame_len);
         }
-
-        /* 窗口未超时，继续聚合中 */
-        return ADX_FAIL;
     }
 
-    default:
-        s_rx_win_state = RX_WIN_IDLE;
-        return ADX_FAIL;
+    return ADX_FAIL;
+}
+
+/**
+ * @brief 把新接收数据追加到当前AT事务响应缓冲。
+ *        缓冲溢出时丢弃最旧数据，始终保留最近ADX_RX_WINDOW_BUFFER_SIZE字节。
+ */
+static void s_at_response_append(const uint8_t *buffer, uint16_t len)
+{
+    if (buffer == NULL || len == 0U)
+    {
+        return;
+    }
+
+    if (len >= ADX_RX_WINDOW_BUFFER_SIZE)
+    {
+        memcpy(s_at_response_buffer,
+               &buffer[len - ADX_RX_WINDOW_BUFFER_SIZE],
+               ADX_RX_WINDOW_BUFFER_SIZE);
+        s_at_response_len = ADX_RX_WINDOW_BUFFER_SIZE;
+    }
+    else
+    {
+        uint32_t combined_len = (uint32_t)s_at_response_len + (uint32_t)len;
+        if (combined_len > ADX_RX_WINDOW_BUFFER_SIZE)
+        {
+            uint16_t discard_len = (uint16_t)(combined_len - ADX_RX_WINDOW_BUFFER_SIZE);
+            uint16_t keep_len = (uint16_t)(s_at_response_len - discard_len);
+            memmove(s_at_response_buffer,
+                    &s_at_response_buffer[discard_len],
+                    keep_len);
+            s_at_response_len = keep_len;
+        }
+
+        memcpy(&s_at_response_buffer[s_at_response_len], buffer, len);
+        s_at_response_len = (uint16_t)(s_at_response_len + len);
+    }
+
+    s_at_response_buffer[s_at_response_len] = '\0';
+}
+
+/**
+ * @brief 分发一段新接收数据：先通知全部URC，再喂给当前在途AT事务。
+ *        AT回调只在有新数据到达时调用，不再重复解析旧缓冲。
+ */
+static void s_dispatch_received_frame(adx_tick_t now,
+                                      const uint8_t *buffer,
+                                      uint16_t len)
+{
+    if (buffer == NULL || len == 0U)
+    {
+        return;
+    }
+
+    // ! URC既可处理模组主动上报，也可作为主动AT指令响应的兜底处理路径。
+    (void)adx_at_urc_polling(buffer, len);
+
+    // ! URC分发不会阻止当前在途指令继续累积并执行自己的rx_cb。
+    if ((s_at_state == ADX_AT_STATE_SEND ||
+         s_at_state == ADX_AT_STATE_WAITING) &&
+        s_current_rx_cb != NULL)
+    {
+        s_at_response_append(buffer, len);
+        if (s_current_rx_cb(s_at_response_buffer, s_at_response_len) == ADX_OK)
+        {
+            s_current_rx_cb = NULL;
+            s_at_state = ADX_AT_STATE_RESP_OK;
+            s_resp_ok_tick = now;
+        }
     }
 }
 
@@ -489,7 +571,7 @@ static void s_load_command(adx_tick_t now, const char *cmd, uint16_t cmd_len,
     s_current_timeout_cb = timeout_cb;
     s_current_timeout_ms = timeout_ms;
 
-    s_recv_buffer_reset();
+    s_at_response_buffer_reset();
     (void)adx_port_uart_send((const uint8_t *)cmd, cmd_len);
 
     s_last_send_tick = now;
@@ -508,12 +590,12 @@ int adx_at_engine_init(void)
     s_current_timeout_cb = NULL;
     s_current_cmd_len = 0U;
     s_last_send_tick = 0U;
+    s_resp_ok_tick = 0U;
 
-    s_rx_win_state = RX_WIN_IDLE;
-    s_rx_win_total_len = 0U;
-    s_rx_frame_len = 0U;
+    s_at_response_buffer_reset();
+    s_rx_window_reset();
 
-    s_last_poll_tick = 0U;
+    s_last_state_step_tick = 0U;
 
     /* port层UART初始化 */
     return adx_port_uart_init();
@@ -526,9 +608,9 @@ int adx_at_engine_init(void)
  * 每次调用执行一轮：收串口帧 → URC分发 → AT状态机推进一步
  *
  * 节奏控制(非阻塞)：
- *   - RESP_OK 后冷却 ADX_RESP_OK_COOLDOWN_MS，让模组喘息
- *   - 其他状态最小间隔 ADX_LOOP_INTERVAL_MS
- *   - 用时间戳判断，不阻塞，移植者可高频调用
+ *   - UART接收和URC分发每次调用都执行，不受冷却/状态机节奏限制
+ *   - AT状态机按ADX_LOOP_INTERVAL_MS推进
+ *   - RESP_OK仅限制下一条命令的发送，冷却期间仍持续处理RX/URC
  *
  * 「队列优先+map保底」体现在 IDLE 分支：
  *   每次IDLE先看队列，队列空才扫map；
@@ -540,27 +622,23 @@ void adx_chain_reaction_polling(void)
     /* 读取当前心跳tick值(引擎只读不自增，自增由移植者调heartbeat完成) */
     adx_tick_t now = adx_tick_get_now();
 
-    /* 节奏控制：距上次执行不足间隔则跳过 */
-    adx_tick_t interval = adx_tick_from_ms(
-        (s_at_state == ADX_AT_STATE_RESP_OK) ? ADX_RESP_OK_COOLDOWN_MS : ADX_LOOP_INTERVAL_MS);
-    if ((now - s_last_poll_tick) < interval)
-    {
-        return;
-    }
-    s_last_poll_tick = now;
-
-    /* ============== [1] 串口接收 + URC分发 ============== */
+    /* ============== [1] 串口接收 + URC分发(始终执行) ============== */
     uint16_t frame_len = 0U;
     if (s_rx_window_step(now, &frame_len) == ADX_OK)
     {
         if (frame_len > 0U)
         {
-            s_rx_frame_len = frame_len;
-            // ! URC既可处理模组主动上报，也可作为主动AT指令响应的兜底处理路径。
-            // ! 这里的URC分发不会阻止后续WAITING分支继续执行当前指令的rx_cb。
-            (void)adx_at_urc_polling(s_recv_window_buffer, frame_len);
+            s_dispatch_received_frame(now, s_rx_collect_buffer, frame_len);
         }
     }
+
+    /* RX/URC处理完成后，才对AT状态机推进做节奏限制 */
+    adx_tick_t state_interval = adx_tick_from_ms(ADX_LOOP_INTERVAL_MS);
+    if ((now - s_last_state_step_tick) < state_interval)
+    {
+        return;
+    }
+    s_last_state_step_tick = now;
 
     /* ============== [2] AT状态机 ============== */
     switch (s_at_state)
@@ -569,6 +647,12 @@ void adx_chain_reaction_polling(void)
     {
         // ! Queue/Map只负责选择下一条待发送的AT指令，不负责接收数据或分发URC。
         // ! 两者只在当前没有在途指令(IDLE)时参与发送调度。
+
+        /* 已收到部分数据时先等待其完成分发，避免跨事务混入下一条响应 */
+        if (s_rx_win_state == RX_WIN_COLLECTING)
+        {
+            break;
+        }
 
         /* 优先取队列指令 */
         adx_queue_item_t q_item;
@@ -601,20 +685,9 @@ void adx_chain_reaction_polling(void)
 
     case ADX_AT_STATE_WAITING:
     {
-        int wait_ret = ADX_FAIL;
-        if (s_current_rx_cb != NULL && s_rx_frame_len > 0U)
-        {
-            wait_ret = s_current_rx_cb(s_recv_window_buffer, s_rx_frame_len);
-        }
-        if (wait_ret == ADX_OK)
-        {
-            /* 回调成功，清理并复位 */
-            s_current_rx_cb = NULL;
-            s_at_state = ADX_AT_STATE_RESP_OK;
-            s_rx_frame_len = 0U; /* 消费掉本次帧 */
-        }
-        else if ((now - s_last_send_tick) >=
-                 adx_tick_from_ms(s_current_timeout_ms))
+        /* 响应回调由RX分发路径在新数据到达时触发；这里只检查总超时 */
+        if ((now - s_last_send_tick) >=
+            adx_tick_from_ms(s_current_timeout_ms))
         {
             s_at_state = ADX_AT_STATE_TIMEOUT;
         }
@@ -624,7 +697,13 @@ void adx_chain_reaction_polling(void)
 
     case ADX_AT_STATE_RESP_OK:
     {
-        s_recv_buffer_reset();
+        if ((now - s_resp_ok_tick) <
+            adx_tick_from_ms(ADX_RESP_OK_COOLDOWN_MS))
+        {
+            break;
+        }
+
+        s_at_response_buffer_reset();
         s_current_rx_cb = NULL;
         s_current_timeout_cb = NULL;
         s_at_state = ADX_AT_STATE_IDLE;
@@ -637,7 +716,7 @@ void adx_chain_reaction_polling(void)
         {
             s_current_timeout_cb(s_current_cmd);
         }
-        s_recv_buffer_reset();
+        s_at_response_buffer_reset();
         s_current_rx_cb = NULL;
         s_current_timeout_cb = NULL;
         s_at_state = ADX_AT_STATE_IDLE;
