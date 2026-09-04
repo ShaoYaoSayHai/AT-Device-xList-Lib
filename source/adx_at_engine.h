@@ -232,6 +232,9 @@ int adx_at_urc_register(const char *name, adx_urc_cb_t callback);
 
 /**
  * @brief URC全局轮询分发(引擎内部调用，开发者通常无需直接调用)
+ *        同一接收窗口会通知所有已注册回调，不会因首个回调命中而停止。
+ *        URC既可处理模组主动上报，也可作为主动AT指令响应的兜底处理路径；
+ *        URC命中本身不会自动结束当前在途AT指令。
  */
 int adx_at_urc_polling(const uint8_t *buffer, uint16_t len);
 

@@ -332,6 +332,8 @@ int adx_at_urc_polling(const uint8_t *buffer, uint16_t len)
         return ADX_FAIL;
     }
 
+    int handled = ADX_FAIL;
+
     for (uint32_t i = 0U; i < ADX_URC_TABLE_SIZE; i++)
     {
         if (s_urc_table[i].is_used)
@@ -339,11 +341,12 @@ int adx_at_urc_polling(const uint8_t *buffer, uint16_t len)
             int ret = s_urc_table[i].urc_cb(buffer, len);
             if (ret == ADX_OK)
             {
-                return ADX_OK; /* 命中即返回 */
+                /* 同一聚合窗口可能包含多个URC，命中后继续通知后续回调 */
+                handled = ADX_OK;
             }
         }
     }
-    return ADX_FAIL;
+    return handled;
 }
 
 /* ======================================================================== */
@@ -553,6 +556,8 @@ void adx_chain_reaction_polling(void)
         if (frame_len > 0U)
         {
             s_rx_frame_len = frame_len;
+            // ! URC既可处理模组主动上报，也可作为主动AT指令响应的兜底处理路径。
+            // ! 这里的URC分发不会阻止后续WAITING分支继续执行当前指令的rx_cb。
             (void)adx_at_urc_polling(s_recv_window_buffer, frame_len);
         }
     }
@@ -562,10 +567,14 @@ void adx_chain_reaction_polling(void)
     {
     case ADX_AT_STATE_IDLE:
     {
+        // ! Queue/Map只负责选择下一条待发送的AT指令，不负责接收数据或分发URC。
+        // ! 两者只在当前没有在途指令(IDLE)时参与发送调度。
+
         /* 优先取队列指令 */
         adx_queue_item_t q_item;
         if (s_queue_dequeue(&q_item) == ADX_OK)
         {
+            // ! Queue发送调度入口：选择业务临时指令，并统一交给s_load_command()发送。
             s_load_command(now, q_item.cmd, q_item.cmd_len,
                            q_item.rx_cb, q_item.timeout_cb, q_item.timeout_ms);
             break;
@@ -574,6 +583,7 @@ void adx_chain_reaction_polling(void)
         adx_map_item_t m_item;
         if (s_map_scan_pick_oldest(now, &m_item) == ADX_OK)
         {
+            // ! Map发送调度入口：选择状态匹配且到期的监控指令，再交给s_load_command()发送。
             uint16_t cmd_len = (uint16_t)strlen(m_item.cmd);
             s_load_command(now, m_item.cmd, cmd_len,
                            m_item.rx_cb, m_item.timeout_cb, m_item.timeout_ms);

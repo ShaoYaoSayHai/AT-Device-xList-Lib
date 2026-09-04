@@ -223,7 +223,7 @@ void example_business_send_http(void)
 {
     /* 这条指令会插队到监控Map指令之前执行 */
     adx_at_enqueue("AT+HTTPGET=http://api.example.com/time\r\n",
-                   NULL,                /* 可不设响应回调，让URC处理 */
+                   NULL,                /* URC可处理关联上报，但当前事务仍会等待超时 */
                    5000U,
                    example_at_timeout_cb);
 }
